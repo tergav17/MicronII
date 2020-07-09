@@ -1,0 +1,18 @@
+package h8;
+
+import java.io.File;
+
+public class H8Packer {
+	
+	public static int pack(String arch, File binary) {
+		
+		if (arch.equalsIgnoreCase("h8_17")) {
+			System.out.println("Packing distribution for Heathkit H8 with H17 controller");
+			System.out.println("Will generate a SS/SD .H8D image");
+		}
+		
+		return 0;
+	}
+	
+	
+}

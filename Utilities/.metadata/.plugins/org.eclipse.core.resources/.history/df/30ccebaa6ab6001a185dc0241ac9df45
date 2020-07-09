@@ -1,0 +1,326 @@
+package asm;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.util.ArrayList;
+import java.util.Scanner;
+
+public class Assembler {
+	
+	private int address = 0x100;
+	private int currentLine = 0;
+	private int error = 0;
+	private int pass = 1;
+	
+	private ArrayList<String> source = new ArrayList<String>();
+	private ArrayList<Symbol> table = new ArrayList<Symbol>();
+	
+	public int assemble(File in, File out) {
+		address = 0x100;
+		error = 0;
+		source.clear();
+		table.clear();
+
+		//Read File Into ArrayList
+		Scanner sc = null;
+		try {
+			sc = new Scanner(in);
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return 1;
+		}
+		
+		while (sc.hasNext()) {
+			source.add(sc.nextLine());
+		}
+		
+		
+		//Pass #1
+		pass = 1;
+		while (currentLine != source.size() && error == 0) {
+			error = processLine(source.get(currentLine));
+			currentLine++;
+		}
+		
+		if (error > 0) {sc.close(); return error;}
+		
+		sc.close();
+		return error;
+	}
+	
+	private int processLine(String line) {
+		int i = 0;
+		
+		boolean isLabel = true;
+	
+		while (i != line.length()) {
+			
+			//Check if char is "#", indicates comment so line should be ignored
+			if (line.charAt(i) == 35) {
+				break;
+			}
+			
+			//If a line has whitespace before any actual characters, it will be treated as an instruction, otherwise it is a label
+			if (line.charAt(i) < 33) {
+				isLabel = false;
+			} else {
+				String[] args = parseLine(line, i);
+				if (args.length == 0) return 0;
+				if (isLabel) {
+					return registerSymbol(args[0], 2, true, address);
+				} else {
+					return processInstruction(args);
+				}
+			}
+			i++;
+		}
+		
+		return 0;
+	}
+	
+	private int processInstruction(String[] args) {
+		if (args[0].equals(".DEF")) {
+			if (args.length < 3) return 0x53;
+			Numeric n = parseNumeric(args[2]);
+			registerSymbol(args[1], n.getType(), n.isRelocatable(), n.getValue());
+		} else {
+			System.out.print("UNID INSTR: ");
+			int o = 0;
+			while (o != args.length) {
+				System.out.print(args[o] + " ");
+				o++;
+			}
+			System.out.println("");
+		}
+		return 0;
+	}
+	
+	private String[] parseLine(String line, int startIndex) {
+		ArrayList<String> buffer = new ArrayList<String>();
+		
+		String t = "";
+		boolean isString = false;
+		while (startIndex != line.length()) {
+			char c = line.charAt(startIndex);
+			if ((c == 32 || c == 44 || c == 58) && !isString) {
+				if (t.length() > 0) buffer.add(t);
+				t = "";
+			} else {
+				t = t + String.valueOf(c);
+				if (c == 34) isString = !isString;
+			}
+			startIndex++;
+		}
+		
+		if (t.length() > 0) buffer.add(t);
+		if (buffer.size() > 0) return toArray(buffer);
+		else return null;
+	}
+	
+	private Numeric parseNumeric(String phrase) {
+		int value = 0;
+		int type = 1;
+		
+		String buffer = "";
+		int sign = 1;
+		
+		boolean relocatable = false;
+		
+		int i = 0;
+		while (i != phrase.length()) {
+			if (phrase.charAt(i) == '*') {
+				relocatable = true;
+				i++;
+				continue;
+			}
+			if (phrase.charAt(i) == '+' || phrase.charAt(i) == '-') {
+				if (phrase.charAt(i) == '+') {
+					sign = 1;
+				} else sign = -1;
+			
+				Numeric n = convertNumeric(buffer);
+				 if (n == null) return null;
+				 if (n.getType() == 2) {
+					 type = 2;
+				 }
+				 value = value + (sign * n.getValue());
+				 while (type == 1 && value > 255) {
+					 value = value - 256;
+				 }
+				 while (type == 1 && value < 0) {
+					 value = value + 256;
+				 }
+				 while (type == 2 && value > 65535) {
+					 value = value - 65536;
+				 }
+				 while (type == 2 && value < 0) {
+					 value = value + 65536;
+				 }
+				
+				buffer = "";
+			} else {
+				buffer = buffer + String.valueOf(phrase.charAt(i));
+			}
+			i++;
+		}	
+		if (buffer.length() > 0) {
+			 Numeric n = convertNumeric(buffer);
+			 if (n == null) return null;
+			 if (n.getType() == 2) {
+				 type = 2;
+			 }
+			 value = value + (sign * n.getValue());
+			 while (type == 1 && value > 255) {
+				 value = value - 256;
+			 }
+			 while (type == 1 && value < 0) {
+				 value = value + 256;
+			 }
+			 while (type == 2 && value > 65535) {
+				 value = value - 65536;
+			 }
+			 while (type == 2 && value < 0) {
+				 value = value + 65536;
+			 }
+		}
+		return new Numeric(value, type, relocatable);
+	}
+	
+	private Numeric convertNumeric(String num) {
+		int value = 0;
+		int type = 1;
+		
+		if (isInteger(num)) {
+			 int x = Integer.valueOf(num);
+			 
+			 if (x > 255) {
+				 type = 2;
+			 }
+			 while (x > 65535) {
+				 x = x - 65536;
+				 type = 2;
+			 }
+			 
+			 value = x;
+			 
+			 
+		 } else if (symbolExists(num)) {
+			 Symbol sym = getSymbol(num);
+			 value = sym.getValue();
+			 type = sym.getType();
+			 
+		 } else return null;
+		
+		return new Numeric(value, type);
+	}
+	
+	private int registerSymbol(String sym, int type, boolean relocatable, int value) {
+		if (symbolExists(sym)) return 0x51;
+		table.add(new Symbol(sym, type, relocatable, value));
+		
+		//Print New Symbol
+		if (relocatable) {
+			System.out.print("*");
+		} else {
+			System.out.print(" ");
+		}
+		System.out.println("0X" + decToHex(value, 4) + " " + sym);
+		
+		return 0;
+	}
+	
+	private boolean symbolExists(String sym) {
+		int i = 0;
+		while (i != table.size()) {
+			if (table.get(i).getName().equals(sym)) return true;
+			i++;
+		}
+		return false;
+	}
+	
+	private Symbol getSymbol(String sym) {
+		int i = 0;
+		while (i != table.size()) {
+			if (table.get(i).getName().equals(sym)) return table.get(i);
+			i++;
+		}
+		return null;
+	}
+	
+	private String[] toArray(ArrayList<String> al) {
+		String array[] = new String[al.size()];              
+		for(int j =0;j<al.size();j++){
+		  array[j] = al.get(j);
+		}
+		return array;
+		
+	}
+	
+	public String decToAscii(int i) {
+		return ((char) i) + "";
+	}
+	
+	public int asciiToDec(String ascii) {
+		return hexToDec(asciiToHex(ascii));
+	}
+	
+	public String hexToAscii(String hexStr) {
+	    StringBuilder output = new StringBuilder("");
+	     
+	    for (int i = 0; i < hexStr.length(); i += 2) {
+	        String str = hexStr.substring(i, i + 2);
+	        output.append((char) Integer.parseInt(str, 16));
+	    }
+	     
+	    return output.toString();
+	}
+	
+	public String asciiToHex(String asciiStr) {
+	    char[] chars = asciiStr.toCharArray();
+	    StringBuilder hex = new StringBuilder();
+	    for (char ch : chars) {
+	    	String hexString = Integer.toHexString((int) ch);
+	    	if (hexString.length() == 1) {
+	    		hexString = "0" + hexString;
+	    	}
+	        hex.append(hexString);
+	    }
+	 
+	    return hex.toString();
+	}
+	
+	public int hexToDec(String hex) {
+		return Integer.parseInt(hex, 16);
+	}
+	
+	public String decToHex(int i, int l) {
+		String out = Integer.toHexString(i).toUpperCase(); 
+		if (l != -1) {
+			while (out.length() < l) {
+				out = "0" + out;
+			}
+			while (out.length() > l) {
+				out = out.substring(1, out.length());
+			}
+		}
+		return out;
+	}
+	
+	public static boolean isInteger(String s) {
+	    return isInteger(s,10);
+	}
+
+	public static boolean isInteger(String s, int radix) {
+	    if(s.isEmpty()) return false;
+	    for(int i = 0; i < s.length(); i++) {
+	        if(i == 0 && s.charAt(i) == '-') {
+	            if(s.length() == 1) return false;
+	            else continue;
+	        }
+	        if(Character.digit(s.charAt(i),radix) < 0) return false;
+	    }
+	    return true;
+	}
+	
+}
+

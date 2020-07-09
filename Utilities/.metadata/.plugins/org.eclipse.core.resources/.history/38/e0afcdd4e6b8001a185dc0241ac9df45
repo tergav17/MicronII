@@ -1,0 +1,973 @@
+package asm;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.util.ArrayList;
+import java.util.Scanner;
+
+public class Assembler {
+	
+	private int address = 0x100;
+	private int pass = 1;
+	
+	private ArrayList<String> source = new ArrayList<String>();
+	private ArrayList<Symbol> table = new ArrayList<Symbol>();
+	
+	public int assemble(File in, File out) {
+		int error = 0;
+		int currentLine = 0;
+		address = 0x100;
+		source.clear();
+		table.clear();
+
+		//Read File Into ArrayList
+		Scanner sc = null;
+		try {
+			sc = new Scanner(in);
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			return 1;
+		}
+		
+		while (sc.hasNext()) {
+			source.add(sc.nextLine());
+		}
+		 
+		
+		//Pass #1
+		System.out.println("PASS #1");
+		pass = 1;
+		while (currentLine != source.size() && error == 0) {
+			error = processLine(source.get(currentLine));
+			if (error > 0) System.out.println("ERROR " + decToHex(error, 2) + " ON LINE " + (currentLine + 1));
+			currentLine++;
+		}
+		
+		if (error > 0) {sc.close(); return error;}
+		
+		//Pass #2
+		System.out.println("PASS #2");
+		address = 0x100;
+		pass = 2;
+		currentLine = 0;
+		while (currentLine != source.size() && error == 0) {
+			error = processLine(source.get(currentLine));
+			if (error > 0) System.out.println("ERROR " + decToHex(error, 2) + " ON LINE " + (currentLine + 1));
+			currentLine++;
+		}
+		
+		if (error > 0) {sc.close(); return error;}
+		
+		sc.close();
+		return error;
+	}
+	
+	private int processLine(String line) {
+		int i = 0;
+		
+		boolean isLabel = true;
+	
+		while (i != line.length()) {
+			
+			//Check if char is "#", indicates comment so line should be ignored
+			if (line.charAt(i) == 35) {
+				break;
+			}
+			
+			//If a line has whitespace before any actual characters, it will be treated as an instruction, otherwise it is a label
+			if (line.charAt(i) < 33) {
+				isLabel = false;
+			} else {
+				String[] args = parseLine(line, i);
+				if (args.length == 0) return 0;
+				if (isLabel) {
+					//Symbols only need to be inserted on the first pass
+					if (pass == 1) return registerSymbol(args[0], 2, true, address);
+					else return 0;
+				} else {
+					return processInstruction(args);
+				}
+			}
+			i++;
+		}
+		
+		return 0;
+	}
+	
+	
+	//Function to process actual instructions
+	//On the first pass, only data spacing is handled in order to fill out the symbol table
+	//On the second pass, actual instruction data is processed
+	private int processInstruction(String[] args) {
+		
+		//DEFINE SYMBOL Instruction: Manually insert a symbol into the symbol table
+		if (args[0].equals(".DEF")) {
+			//We only define symbols on the first pass
+			if (pass == 1) {
+				if (args.length < 3) return 0x53;
+				Numeric n = parseNumeric(args[2]);
+				
+				//Bad numeric, return error
+				if (n == null) return 0x52;
+				
+				registerSymbol(args[1], n.getType(), n.isRelocatable(), n.getValue());
+			}
+		} else 
+			
+		//DEFINE BYTE Instruction: Manually insert data into the executable
+		if (args[0].equals(".DB")) {
+			int i = 1;
+			while (i != args.length) {
+				if (args[i].charAt(0) == '"' && args[i].length() > 2) {
+					int o = 1;
+					while (o != args[i].length() - 1) {
+						//Increment address for every byte of the string during the first pass
+						address++;
+						if (pass == 2) {
+							writeByte(args[i].charAt(o), false);
+						}
+						o++;
+					}
+				} else {
+					Numeric n = parseNumeric(args[i]); 
+					//Bad numeric, return error
+					if (n == null) return 0x52;
+					
+					//Add the length of the numeric to the address during the first pass
+
+					address = address + n.getType();
+					if (pass == 2) {
+						if (n.getType() == 1) {
+							writeByte(n.getValue(), n.isRelocatable());
+						} else {
+							writeAddress(n.getValue(), n.isRelocatable());
+						}
+					}
+				}
+				i++;
+			}
+		} else
+			
+		// CHANGE ORIGIN Instruction: Manually set the current address of the assembly, can only be addresses that are higher than current address
+		if (args[0].equals(".ORG")) {
+			if (args.length < 2) return 0x53;
+			Numeric n = parseNumeric(args[1]);
+			
+			//Bad numeric, return error
+			if (n == null) return 0x52;
+			
+			//Return error if numeric is less than address
+			if (address > n.getValue()) return 0x55;
+			
+			//Pad buffer with "0"
+			int diff = n.getValue() - address;
+			int i = 0;
+			while (i != diff && pass == 2) {
+				writeByte(0, false);
+				i++;
+			}
+			
+			address = n.getValue();
+		} else
+			
+		//LD: Moves a register or value into another register
+		if (args[0].equals("LD")) {
+			if (args.length < 3) return 0x53;
+			
+			String dest = args[1];
+			String src = args[2];
+			int mpos = getMainRegPos(src);
+			int dpos = getMainRegPos(dest);
+			
+			//The "A" register has extra options, this branch handles them
+			if (dest.equals("A")) {
+				if (mpos != -1) {
+					address++;
+					if (pass == 2) writeByte(0x78 + mpos, false);
+				} else if (src.equals("(BC)")) {
+					address++;
+					if (pass == 2) writeByte(0x0A, false);
+				} else if (src.equals("(DE)")) {
+					address++;
+					if (pass == 2) writeByte(0x1A, false);
+				} else {
+					String strip = stripPointer(src);
+					//If strip is null, that means that the source is not a pointer, and to handle it like a constant
+					if (strip == null) { 
+						Numeric n = parseNumeric(src);
+						address = address + 2;
+						
+						//Bad numeric, return error if on second pass (due to possible later defined symbol)
+						if (n == null) { if (pass == 2) return 0x52;
+						else return 0; }
+						
+						//Value too large, return error
+						if (n.getType() > 1) return 0x57;
+						
+						if (pass == 2) {
+							writeByte(0x3E, false);
+							writeByte(n.getValue(), n.isRelocatable());
+						}
+					} else {
+						Numeric n = parseNumeric(strip);
+						address = address + 3;
+						
+						//Bad numeric, return error if on second pass (due to possible later defined symbol)
+						if (n == null) { if (pass == 2) return 0x52;
+						else return 0; }
+						
+						if (pass == 2) {
+							writeByte(0x3A, false);
+							writeAddress(n.getValue(), n.isRelocatable());
+						}
+					}
+				}
+			// Otherwise, if the destination is a valid "standard" register that is not "A", this branch will be used
+			} else if (dpos != -1) {
+				//If both the source and destination are "standard" registers, then the following will be a 1 byte instruction
+				if (mpos != -1) { 
+					address++; 
+					if (pass == 2) writeByte(0x40 + ((dpos * 8) + mpos), false);
+				//Otherwise, a constant is assumed
+				} else {
+					Numeric n = parseNumeric(src);
+					address = address + 2;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+					
+					//Value too large, return error
+					if (n.getType() > 1) return 0x57;
+					
+					if (pass == 2) {
+						writeByte(0x06 + (dpos * 8), false);
+						writeByte(n.getValue(), n.isRelocatable());
+					}
+
+				}
+			
+			//For the register pairs "BC", "DE", the only options are to load a constant on the 8080
+			} else if (dest.equals("BC")) {
+				Numeric n = parseNumeric(src);
+				address = address + 3;
+				
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+				else return 0; }
+				
+				if (pass == 2) {
+					writeByte(0x01, false);
+					writeAddress(n.getValue(), n.isRelocatable());
+				}
+				
+				
+			} else if (dest.equals("DE")) {
+				Numeric n = parseNumeric(src);
+				address = address + 3;
+				
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+				else return 0; }
+				
+				if (pass == 2) {
+					writeByte(0x11, false);
+					writeAddress(n.getValue(), n.isRelocatable());
+				}
+			//In addition to loading from a constant, the "HL" register can also load from a constant pointer
+			} else if (dest.equals("HL")) {
+				String strip = stripPointer(src);
+				
+				//If strip is null, that means that the source is not a pointer, and to handle it like a constant
+				if (strip == null) { 
+					Numeric n = parseNumeric(src);
+					address = address + 3;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+					
+					if (pass == 2) {
+						writeByte(0x21, false);
+						writeAddress(n.getValue(), n.isRelocatable());
+					}
+
+					
+				} else {
+					Numeric n = parseNumeric(strip);
+					address = address + 3;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+					
+					if (pass == 2) {
+						writeByte(0x2A, false);
+						writeAddress(n.getValue(), n.isRelocatable());
+					}
+					
+					
+				}
+				
+			//The "SP" register can be set with either a constant, or loaded from "HL"
+			} else if (dest.equals("SP")) {
+				if (src.equals("HL")) {
+					address = address + 1;
+					if (pass == 2) writeByte(0xF9, false);
+				} else {
+					Numeric n = parseNumeric(src);
+					address = address + 3;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+					
+					if (pass == 2) {
+						writeByte(0x31, false);
+						writeAddress(n.getValue(), n.isRelocatable());
+					}
+					
+	
+				}
+				
+			//Both "(BC)" and "(DE)" can only be loaded from the "A" register
+			} else if (dest.equals("(BC)")) {
+				if (src.equals("A")) {
+					address = address + 1;
+					if (pass == 2) writeByte(0x02, false);
+				} else {
+					return 0x56;
+				}
+			} else if (dest.equals("(DE)")) {
+				if (src.equals("A")) {
+					address = address + 1;
+					if (pass == 2) writeByte(0x12, false);
+				} else {
+					return 0x56;
+				}
+			}
+			//If the destination is not a constant register or register/pointer, then the only other possibility is that it is a pointer
+			else {
+				String strip = stripPointer(src);
+				
+				//If strip is null, that means that the destination is not a pointer, and there for invalid
+				if (strip == null) { 
+					return 0x56;
+				} else {
+					Numeric n = parseNumeric(strip);
+					address = address + 3;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+					
+					if (pass == 2) {
+						writeByte(0x32, false);
+						writeAddress(n.getValue(), n.isRelocatable());
+					}
+					
+				}
+			}
+		} else
+			
+		//ADD: Add a register or value to another
+		if (args[0].equals("ADD")) {
+			
+			//If the instruction only has one argument, it is an addition to the "A" register
+			if (args.length == 2) {
+				int dpos = getMainRegPos(args[1]);
+				if (dpos != -1) {
+					address = address + 1;
+					if (pass == 2) writeByte(0x80 + dpos, false);
+				//This situation occurs when a constant is added to the "A" register
+				} else {
+					Numeric n = parseNumeric(args[1]);
+					address = address + 2;
+					
+					//Bad numeric, return error if on second pass (due to possible later defined symbol)
+					if (n == null) { if (pass == 2) return 0x52;
+					else return 0; } 
+					
+					//Value too large, return error
+					if (n.getType() > 1) return 0x57;
+					
+					if (pass == 2) {
+						writeByte(0xC6, false);
+						writeByte(n.getValue(), n.isRelocatable());
+					}
+				}
+			} else if (args.length > 2) {
+				if (args[1].equals("HL")) {
+					//The only possible additions to "HL" are the other register pairs, these are all 1 byte instructions
+					address = address + 1;
+					if (args[2].equals("BC")) {
+						if (pass == 2) writeByte(0x09, false);
+					} else if (args[2].equals("DE")) {
+						if (pass == 2) writeByte(0x19, false);
+					} else if (args[2].equals("HL")) {
+						if (pass == 2) writeByte(0x29, false);
+					} else if (args[2].equals("SP")) {
+						if (pass == 2) writeByte(0x39, false);
+					} else {
+						return 0x56;
+					}
+				} else {
+					return 0x56;
+				}
+			} else {
+				return 0x53;
+			}
+		} else
+		
+		//SUB: Subtract a register or value from "A"
+		if (args[0].equals("SUB")) {
+			if (args.length < 2) return 0x53;
+			
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0x90 + dpos, false);
+				
+			//This situation occurs when a constant is subtracted from the "A" register
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+				
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+				else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+				
+				if (pass == 2) {
+					writeByte(0xD6, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+		
+		//ADC: Add a register or value to "A" with carry
+		if (args[0].equals("ADC")) {
+			if (args.length < 2) return 0x53;
+				
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register addition
+				address = address + 1;
+				if (pass == 2) writeByte(0x88 + dpos, false);
+				
+			//This situation occurs when a constant is added to the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+					
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+				else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+				
+				if (pass == 2) {
+					writeByte(0xCE, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+			
+		//SBC: Subtract a register or value from "A" with carry
+		if (args[0].equals("SBC")) {
+			if (args.length < 2) return 0x53;
+						
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0x98 + dpos, false);
+							
+				//This situation occurs when a constant is subtracted from the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+						
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+				
+				if (pass == 2) {
+					writeByte(0xDE, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+		
+		//AND: Perform an "AND" operation on a register or value with "A"
+		if (args[0].equals("AND")) {
+			if (args.length < 2) return 0x53;
+							
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0xA0 + dpos, false);
+								
+				//This situation occurs when a constant is subtracted from the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+							
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+					
+				if (pass == 2) {
+					writeByte(0xE6, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+		
+		//XOR: Perform an "XOR" operation on a register or value with "A"
+		if (args[0].equals("XOR")) {
+			if (args.length < 2) return 0x53;
+							
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0xA8 + dpos, false);
+								
+				//This situation occurs when a constant is subtracted from the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+							
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+					
+				if (pass == 2) {
+					writeByte(0xEE, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else 
+		
+		//OR: Perform an "OR" operation on a register or value with "A"
+		if (args[0].equals("OR")) {
+			if (args.length < 2) return 0x53;
+							
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0xB0 + dpos, false);
+								
+				//This situation occurs when a constant is subtracted from the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+							
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+					
+				if (pass == 2) {
+					writeByte(0xF6, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+		
+		//CP: Perform a "CP" operation on a register or value with "A"
+		if (args[0].equals("CP")) {
+			if (args.length < 2) return 0x53;
+							
+			int dpos = getMainRegPos(args[1]);
+			if (dpos != -1) {
+				//Standard main register subtraction
+				address = address + 1;
+				if (pass == 2) writeByte(0xB8 + dpos, false);
+								
+				//This situation occurs when a constant is subtracted from the "A" register with carry
+			} else {
+				Numeric n = parseNumeric(args[1]);
+				address = address + 2;
+							
+				//Bad numeric, return error if on second pass (due to possible later defined symbol)
+				if (n == null) { if (pass == 2) return 0x52;
+					else return 0; }
+				
+				//Value too large, return error
+				if (n.getType() > 1) return 0x57;
+					
+				if (pass == 2) {
+					writeByte(0xFE, false);
+					writeByte(n.getValue(), n.isRelocatable());
+				}
+			}
+		} else
+		
+		//RET: Pop the top of the stack into the "PC" register (return from a subroutine)
+		if (args[0].equals("RET")) {
+			address++;
+			if (args.length > 1) {
+				int cpos = getConditionPos(args[1]);
+				if (pass == 2) writeByte(0xC0 + (cpos * 8), false);
+			} else {
+				if (pass == 2) writeByte(0xC9, false);
+			}
+		}
+		
+		// Unidentified Instruction Handling
+		else {
+			System.out.print("UNID INSTR: ");
+			int o = 0;
+			while (o != args.length) {
+				System.out.print(args[o] + " ");
+				o++;
+			}
+			System.out.println("");
+			return 0x54;
+		}
+		return 0;
+	}
+	
+	private void writeByte(int b, boolean relocated) {
+		System.out.print("WRITTEN: 0X" + decToHex(b,2));
+		if (relocated) System.out.println("*");
+		else System.out.println(" ");
+		//Template
+	}
+	
+	private void writeAddress(int s, boolean relocated) {
+		System.out.print("WRITTEN: 0X" + decToHex(s,4));
+		if (relocated) System.out.println("*");
+		else System.out.println(" ");
+		//Template
+	}
+	
+	
+	private String stripPointer(String in) {
+		if (in.length() > 2) {
+			if (in.charAt(0) == '(' && in.charAt(in.length() - 1) == ')') {
+				return in.substring(1, in.length()-1);
+			}
+		}
+		return null;
+	}
+	
+	private int getMainRegPos(String reg) {
+		switch (reg) {
+			case "B": return 0;
+			case "C": return 1;
+			case "D": return 2;
+			case "E": return 3;
+			case "H": return 4;
+			case "L": return 5;
+			case "(HL)": return 6;
+			case "A": return 7;
+			default: return -1;
+		}
+	}
+	
+	private int getConditionPos(String reg) {
+		switch (reg) {
+			case "NZ": return 0;
+			case "Z": return 1;
+			case "NC": return 2;
+			case "C": return 3;
+			case "PO": return 4;
+			case "PE": return 5;
+			case "P": return 6;
+			case "M": return 7;
+			default: return -1;
+		}
+	}
+	//Parses a line of text into an array, split up by " ", ",", and ":"
+	private String[] parseLine(String line, int startIndex) {
+		ArrayList<String> buffer = new ArrayList<String>();
+		
+		String t = "";
+		boolean isString = false;
+		while (startIndex != line.length()) {
+			char c = line.charAt(startIndex);
+			if ((c == 32 || c == 44 || c == 58) && !isString) {
+				if (t.length() > 0) buffer.add(t);
+				t = "";
+			} else {
+				t = t + String.valueOf(c);
+				if (c == 34) isString = !isString;
+			}
+			startIndex++;
+		}
+		
+		if (t.length() > 0) buffer.add(t);
+		if (buffer.size() > 0) return toArray(buffer);
+		else return null;
+	}
+	
+	//Parses a numeric phrase into a numeric object, with a value, length, and relocation flag
+	//Accounts for addition and subtraction operators
+	private Numeric parseNumeric(String phrase) {
+		int value = 0;
+		int type = 1;
+		
+		String buffer = "";
+		int sign = 1;
+		
+		boolean relocatable = false;
+		
+		int i = 0;
+		while (i != phrase.length()) {
+			if (phrase.charAt(i) == '*') {
+				relocatable = true;
+				i++;
+				continue;
+			}
+			if (phrase.charAt(i) == '+' || phrase.charAt(i) == '-') {
+				if (phrase.charAt(i) == '+') {
+					sign = 1;
+				} else sign = -1;
+			
+				Numeric n = convertNumeric(buffer);
+				 if (n == null) return null;
+				 
+				 if (n.isRelocatable()) relocatable = true;
+				 if (n.getType() == 2) {
+					 type = 2;
+				 }
+				 value = value + (sign * n.getValue());
+				 while (type == 1 && value > 255) {
+					 value = value - 256;
+				 }
+				 while (type == 1 && value < 0) {
+					 value = value + 256;
+				 }
+				 while (type == 2 && value > 65535) {
+					 value = value - 65536;
+				 }
+				 while (type == 2 && value < 0) {
+					 value = value + 65536;
+				 }
+				
+				buffer = "";
+			} else {
+				buffer = buffer + String.valueOf(phrase.charAt(i));
+			}
+			i++;
+		}	
+		if (buffer.length() > 0) {
+			 Numeric n = convertNumeric(buffer);
+			 if (n == null) return null;
+			 
+			 if (n.isRelocatable()) relocatable = true;
+			 if (n.getType() == 2) {
+				 type = 2;
+			 }
+			 value = value + (sign * n.getValue());
+			 while (type == 1 && value > 255) {
+				 value = value - 256;
+			 }
+			 while (type == 1 && value < 0) {
+				 value = value + 256;
+			 }
+			 while (type == 2 && value > 65535) {
+				 value = value - 65536;
+			 }
+			 while (type == 2 && value < 0) {
+				 value = value + 65536;
+			 }
+		}
+		return new Numeric(value, type, relocatable);
+	}
+	
+	//Converts a simple integer, hexadecimal, or symbol into a numeric
+	private Numeric convertNumeric(String num) {
+		int value = 0;
+		int type = 1;
+		boolean relocatable = false;
+		if (isInteger(num)) {
+			 int x = Integer.valueOf(num);
+			 
+			 if (x > 255) {
+				 type = 2;
+			 }
+			 while (x > 65535) {
+				 x = x - 65536;
+				 type = 2;
+			 }
+			 
+			 value = x;
+			 
+			 
+		 } else if (isHex(num)) {
+			 if (num.length() == 4) {
+				 type = 1;
+				 value = hexToDec(num.substring(2, 4));
+			 } else if (num.length() == 6) {
+				 type = 2;
+				 value = hexToDec(num.substring(2,6));
+			 } else {
+				 //Shouldn't ever be able to get here
+				 return null;
+			 }
+		 } else if (symbolExists(num)) {
+			 Symbol sym = getSymbol(num);
+			 value = sym.getValue();
+			 type = sym.getType();
+			 relocatable = sym.isRelocatable();
+			 
+		 } else return null;
+		
+		return new Numeric(value, type, relocatable);
+	}
+	
+	//Registers a new symbol into the table
+	private int registerSymbol(String sym, int type, boolean relocatable, int value) {
+		if (symbolExists(sym)) return 0x51;
+		table.add(new Symbol(sym, type, relocatable, value));
+		
+		//Print New Symbol
+		if (relocatable) {
+			System.out.print("*");
+		} else {
+			System.out.print(" ");
+		}
+		if (type == 2) {
+			System.out.println("0X" + decToHex(value, 4) + " " + sym);
+		} else {
+			System.out.println("0X" + decToHex(value, 2) + "   " + sym);
+		}
+		
+		return 0;
+	}
+	
+	//Checks if symbol exists
+	private boolean symbolExists(String sym) {
+		int i = 0;
+		while (i != table.size()) {
+			if (table.get(i).getName().equals(sym)) return true;
+			i++;
+		}
+		return false;
+	}
+	
+	//Retrieves a symbol from the table
+	private Symbol getSymbol(String sym) {
+		int i = 0;
+		while (i != table.size()) {
+			if (table.get(i).getName().equals(sym)) return table.get(i);
+			i++;
+		}
+		return null;
+	}
+	
+	private String[] toArray(ArrayList<String> al) {
+		String array[] = new String[al.size()];              
+		for(int j =0;j<al.size();j++){
+		  array[j] = al.get(j);
+		}
+		return array;
+		
+	}
+	
+	private String decToAscii(int i) {
+		return ((char) i) + "";
+	}
+	
+	private int asciiToDec(String ascii) {
+		return hexToDec(asciiToHex(ascii));
+	}
+	
+	private String hexToAscii(String hexStr) {
+	    StringBuilder output = new StringBuilder("");
+	     
+	    for (int i = 0; i < hexStr.length(); i += 2) {
+	        String str = hexStr.substring(i, i + 2);
+	        output.append((char) Integer.parseInt(str, 16));
+	    }
+	     
+	    return output.toString();
+	}
+	
+	private String asciiToHex(String asciiStr) {
+	    char[] chars = asciiStr.toCharArray();
+	    StringBuilder hex = new StringBuilder();
+	    for (char ch : chars) {
+	    	String hexString = Integer.toHexString((int) ch);
+	    	if (hexString.length() == 1) {
+	    		hexString = "0" + hexString;
+	    	}
+	        hex.append(hexString);
+	    }
+	 
+	    return hex.toString();
+	}
+	
+	private int hexToDec(String hex) {
+		return Integer.parseInt(hex, 16);
+	}
+	
+	private String decToHex(int i, int l) {
+		String out = Integer.toHexString(i).toUpperCase(); 
+		if (l != -1) {
+			while (out.length() < l) {
+				out = "0" + out;
+			}
+			while (out.length() > l) {
+				out = out.substring(1, out.length());
+			}
+		}
+		return out;
+	}
+	
+	public boolean isInteger(String s) {
+	    return isInteger(s,10);
+	}
+
+	public boolean isInteger(String s, int radix) {
+	    if(s.isEmpty()) return false;
+	    for(int i = 0; i < s.length(); i++) {
+	        if(i == 0 && s.charAt(i) == '-') {
+	            if(s.length() == 1) return false;
+	            else continue;
+	        }
+	        if(Character.digit(s.charAt(i),radix) < 0) return false;
+	    }
+	    return true;
+	}
+	
+	private boolean isHex(String s) {
+		if (s.length() == 4 || s.length() == 6) {
+			if (s.substring(0, 2).equals("0X")) {
+				int i = 2;
+				while (i != s.length()) {
+					if ((s.charAt(i) > 47 && s.charAt(i) < 58) || (s.charAt(i) > 64 && s.charAt(i) < 71)) {
+						i++;
+					} else {
+						return false;
+					}
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+	
+}
+
