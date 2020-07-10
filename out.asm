@@ -1,5 +1,0 @@
-	.DEF X,*0X00E0
-	.DEF Y,0XFF
-START:
-	OS
-END:
