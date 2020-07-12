@@ -18,7 +18,14 @@ public class H8Packer {
 		return 1;
 	}
 	
+	private String writeKernelToImage() {
+		return null;
+	}
 	
+	private String readFileToString(File f) {
+		
+		return null;
+	}
 	
 	private void writeStringToFile(File out, String s) {
 		try {
