@@ -13,6 +13,15 @@ ResetTerminal:
 	;Clear out the graphics buffer
 	call ClearBuffer
 	
+	ld hl, $C400
+	
+	ld (hl), 0
+	ld d, h
+	ld e, l
+	inc de
+	ld bc, 239
+	ldir
+	
 	;Reset cursor position to 0,0
 	ld a, 0
 	ld (curPosX), a

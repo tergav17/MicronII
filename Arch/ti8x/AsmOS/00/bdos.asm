@@ -46,7 +46,6 @@ BDOSBootEntry:
 	
 	call SafeCopy
 	
-	
 	jp $
 	
 	;BDOS Command Line Interface
@@ -65,13 +64,41 @@ CommandCLI:
 	call PutChar
 	call SafeCopy
 	
-CLILoop:
+	;Grab key
+GetKeyCLI:
 	call WaitKey
 	ld e, a
 	
+	;Compare if key is low than $21
+	cp $21
+	jp c, GetKeyCLI
+	
+	;Save DE
+	push de
+
+	;Draw command
 	call PutChar
+	
+	ld e, $0A
+	
+	call PutChar
+			
+	;Recall DE
+	pop de
+	
+	ld a, e
+	
+	cp '0'
+	ret z
+	
+	cp '1'
+	jp z, Boot
+	
+	cp '9'
+	jp z, HelpCLI
+
 	call SafeCopy
-	jp CLILoop
+	jp CommandCLI
 	
 	
 	;Prints out a string
