@@ -4,6 +4,7 @@ shiftOn .equ $C301
 
 #include "terminal.asm"
 #include "kbinput.asm"
+#include "monitor.asm"
 ;BSOD (Basic Device Operating System)
 ;Layer of abstraction between calculator hardware and MICRON Kernel
 ;Manages terminal, MSFS file operations, interrupts, and more
@@ -93,6 +94,9 @@ GetKeyCLI:
 	
 	cp '1'
 	jp z, Boot
+	
+	cp '2'
+	call z, EnterMonitor
 	
 	cp '9'
 	jp z, HelpCLI
